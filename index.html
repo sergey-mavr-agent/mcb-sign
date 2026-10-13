@@ -1,0 +1,284 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data:; connect-src 'none'; form-action 'none'; base-uri 'none'">
+<title>moneycanbuy · sign</title>
+<style>
+  :root { color-scheme: dark; --bg:#0b0d0b; --card:#151915; --line:#263026; --fg:#e8efe8; --dim:#8a978a; --ok:#3ecf7a; --bad:#ff5d5d; }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--fg); font:15px/1.4 ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,sans-serif; }
+  main { max-width:440px; margin:0 auto; padding:18px 16px 40px; }
+  header { display:flex; align-items:center; gap:8px; margin-bottom:14px; font-weight:700; letter-spacing:.2px; }
+  header i { width:10px; height:10px; border-radius:2px; background:var(--ok); display:inline-block; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:14px; padding:14px; margin-bottom:12px; }
+  .row { display:flex; justify-content:space-between; gap:10px; padding:6px 0; border-bottom:1px solid var(--line); }
+  .row:last-child { border-bottom:0; }
+  .row span:first-child { color:var(--dim); }
+  .row span:last-child { text-align:right; overflow-wrap:anywhere; }
+  .big { font-size:28px; font-weight:800; margin:2px 0 8px; }
+  .badge { display:inline-block; padding:2px 8px; border-radius:999px; border:1px solid var(--line); font-size:12px; color:var(--dim); margin-right:6px; }
+  .badge.ok { color:var(--ok); border-color:var(--ok); }
+  .badge.bad { color:var(--bad); border-color:var(--bad); }
+  button, a.btn { display:block; width:100%; text-align:center; padding:14px; margin:8px 0 0; border-radius:12px; border:0; font:inherit; font-weight:700; cursor:pointer; text-decoration:none; }
+  .primary { background:var(--ok); color:#06210f; }
+  .ghost { background:transparent; color:var(--fg); border:1px solid var(--line); }
+  button:disabled { opacity:.45; cursor:default; }
+  .msg { min-height:20px; margin-top:10px; color:var(--dim); overflow-wrap:anywhere; }
+  .msg.bad { color:var(--bad); } .msg.ok { color:var(--ok); }
+  details { margin-top:10px; color:var(--dim); } summary { cursor:pointer; }
+  pre { white-space:pre-wrap; overflow-wrap:anywhere; font-size:11px; background:#0f120f; padding:8px; border-radius:8px; }
+  textarea { width:100%; height:90px; background:#0f120f; color:var(--fg); border:1px solid var(--line); border-radius:8px; font:12px ui-monospace,monospace; padding:8px; }
+  .step { color:var(--dim); font-size:13px; }
+  .step.done { color:var(--ok); }
+  .tx { padding:8px 0; border-bottom:1px solid var(--line); } .tx .step { color:var(--fg); font-size:14px; } .tx .step.done { color:var(--ok); }
+  .tx .sub { color:var(--dim); font-size:12px; margin-top:2px; overflow-wrap:anywhere; }
+</style>
+</head>
+<body>
+<main>
+  <header><i></i> moneycanbuy · sign</header>
+  <div id="app"><div class="card">Loading…</div></div>
+</main>
+<script>
+"use strict";
+// One page, no network. The link carries what to sign; the wallet signs; the page shows a short code to send back.
+// It only ever signs IMD payments to IMD: every address below is fixed, a link that names another one is refused.
+const C = {
+  chainId: 1,
+  imd: "0xd34a99bc0f67ae1bbd63c660e6d0b0dd03e263b7",
+  payTo: "0x4e0fa57bde726079356537e2f34d671e9f41adbc",          // IMD treasury: x402 payTo and the Intake payee
+  permit2: "0x000000000022d473030f116ddee9f6b43ac78ba3",
+  proxy: "0x402085c248eea27d92e8b30b2c58ed07f9e20001",            // x402ExactPermit2Proxy, the Permit2 spender
+  intakes: { "0xa43e6f75ee006411f79ac1c84120606c2330de82": "Intake v2", "0x1397434cd35e8a9c8ac312a61d3a285eb31dea56": "Intake v1" },
+  maxPay: 10n ** 18n,            // one x402 payment or one Intake request: at most 1 IMD
+  maxApprove: 10n * 10n ** 18n,  // one approval: at most 10 IMD
+  sel: { approve: "0x095ea7b3", request: "0x380c2cda", requestWithFailure: "0x9a78c321" },
+};
+const $app = document.getElementById("app");
+const lc = (s) => String(s).toLowerCase();
+const short = (a) => a ? a.slice(0, 6) + "…" + a.slice(-4) : "";
+const imd = (wei) => { const w = BigInt(wei); const i = w / 10n ** 18n, f = (w % 10n ** 18n).toString().padStart(18, "0").replace(/0+$/, ""); return (f ? `${i}.${f.slice(0, 4)}` : `${i}`) + " IMD"; };
+const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+const b64uToBytes = (s) => Uint8Array.from(atob(s.replace(/-/g, "+").replace(/_/g, "/") + "===".slice((s.length + 3) % 4)), (c) => c.charCodeAt(0));
+const bytesToB64u = (b) => btoa(String.fromCharCode(...b)).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+const hexToBytes = (h) => Uint8Array.from(h.slice(2).match(/../g) || [], (x) => parseInt(x, 16));
+const bytesToHex = (b) => "0x" + Array.from(b, (x) => x.toString(16).padStart(2, "0")).join("");
+// canonical JSON exactly as the IMD docs write it: sorted keys, no whitespace
+const canon = (v) => v === null ? "null" : Array.isArray(v) ? `[${v.map(canon).join(",")}]`
+  : typeof v === "object" ? `{${Object.keys(v).sort().map((k) => `${JSON.stringify(k)}:${canon(v[k])}`).join(",")}}`
+  : JSON.stringify(v);
+const sha256hex = async (s) => bytesToHex(new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(s))));
+// wallets differ: some return v as 0/1; Permit2 and the IMD check want 27/28, lowercase hex
+function normSig(sig) {
+  if (!/^0x[0-9a-fA-F]{130}$/.test(sig)) throw new Error("The wallet returned a signature of an unexpected shape.");
+  const b = hexToBytes(lc(sig)); if (b[64] < 27) b[64] += 27; return bytesToHex(b);
+}
+
+async function readRequest() {
+  const p = new URLSearchParams(location.hash.slice(1) || location.search.slice(1));
+  const r = p.get("r"); if (!r) throw new Error("This link carries nothing to sign.");
+  const raw = b64uToBytes(r);
+  let text;
+  if (p.get("z") === "0") text = new TextDecoder().decode(raw);
+  else text = await new Response(new Blob([raw]).stream().pipeThrough(new DecompressionStream("deflate-raw"))).text();
+  return JSON.parse(text);
+}
+
+// ---------- checks: refuse anything that is not an IMD payment to IMD ----------
+function checkX402(q) {
+  const pay = q.payment, a = pay.accepted, auth = pay.payload.permit2Authorization, qa = q.qa;
+  const must = (ok, what) => { if (!ok) throw new Error("Refused: " + what + "."); };
+  must(q.chainId === C.chainId && a.network === "eip155:1", "not Ethereum mainnet");
+  must(a.scheme === "exact" && a.extra && a.extra.assetTransferMethod === "permit2", "not an x402 Permit2 payment");
+  must(lc(a.asset) === C.imd && lc(auth.permitted.token) === C.imd && lc(qa.asset) === C.imd, "the token is not IMD");
+  must(lc(a.payTo) === C.payTo && lc(auth.witness.to) === C.payTo && lc(qa.payTo) === C.payTo, "the money does not go to IMD");
+  must(lc(auth.spender) === C.proxy, "the spender is not the x402 Permit2 proxy");
+  must(a.amount === auth.permitted.amount && a.amount === qa.amount && BigInt(a.amount) <= C.maxPay, "the amount does not match or is above 1 IMD");
+  must(lc(auth.from) === lc(q.payer), "the payment is not from the payer wallet");
+  must(BigInt(auth.deadline) < BigInt(qa.expiresAt), "the permit outlives the quote");
+  must(!pay.resource || pay.resource.url === qa.resource, "the payment names another order");
+  must(auth.witness.validAfter === "0", "unexpected start time");
+}
+const word = (data, i) => "0x" + data.slice(10 + 64 * i, 10 + 64 * (i + 1));
+const wordAddr = (data, i) => "0x" + data.slice(10 + 64 * i + 24, 10 + 64 * (i + 1));
+function decodeTx(t) {
+  const to = lc(t.to), d = lc(t.data), sel = d.slice(0, 10);
+  if (t.value && BigInt(t.value) !== 0n) throw new Error("Refused: the transaction sends ETH.");
+  if (to === C.imd && sel === C.sel.approve) {
+    const spender = wordAddr(d, 0), amount = BigInt(word(d, 1));
+    const name = spender === C.permit2 ? "Permit2" : C.intakes[spender];
+    if (!name) throw new Error("Refused: approval to an unknown contract " + spender + ".");
+    if (amount > C.maxApprove) throw new Error("Refused: approval above 10 IMD.");
+    return { title: `Approve ${imd(amount)}`, sub: `to ${name}`, amount: 0n };
+  }
+  if (C.intakes[to] && (sel === C.sel.request || sel === C.sel.requestWithFailure)) {
+    const wf = sel === C.sel.requestWithFailure;
+    const action = new TextDecoder().decode(hexToBytes(word(d, 0))).replace(/\0+$/, "");
+    const asset = wordAddr(d, wf ? 5 : 4), amount = BigInt(word(d, wf ? 6 : 5));
+    const off = Number(BigInt(word(d, 1))) * 2, len = Number(BigInt("0x" + d.slice(10 + off, 10 + off + 64)));
+    const body = new TextDecoder().decode(hexToBytes("0x" + d.slice(10 + off + 64, 10 + off + 64 + len * 2)));
+    if (asset !== C.imd) throw new Error("Refused: the request pays in a token that is not IMD.");
+    if (amount > C.maxPay) throw new Error("Refused: a request above 1 IMD.");
+    let q = body; try { q = JSON.parse(body).question || body; } catch {}
+    return { title: `Ask the swarm · ${imd(amount)}`, sub: `${C.intakes[to]} · ${action} · “${q.slice(0, 90)}${q.length > 90 ? "…" : ""}”`, amount, body };
+  }
+  throw new Error("Refused: a transaction this page does not know.");
+}
+
+// ---------- wallet ----------
+let wallet = null;
+const providers = [];
+window.addEventListener("eip6963:announceProvider", (e) => providers.push(e.detail));
+window.dispatchEvent(new Event("eip6963:requestProvider"));
+async function connect(payer) {
+  const p = (providers.find((x) => /rabby|metamask/i.test(x.info.name)) || providers[0] || {}).provider || window.ethereum;
+  if (!p) throw new Error("No wallet here. Open this link inside MetaMask or Rabby (their built-in browser), or on a computer with the extension.");
+  const accounts = await p.request({ method: "eth_requestAccounts" });
+  const acc = accounts.map(lc).find((a) => a === lc(payer));
+  if (!acc) throw new Error(`Wrong wallet: ${short(accounts[0] || "none")} is connected, the order is paid by ${short(payer)}. Switch the account and press Connect again.`);
+  const cid = await p.request({ method: "eth_chainId" });
+  if (parseInt(cid, 16) !== C.chainId) {
+    await p.request({ method: "wallet_switchEthereumChain", params: [{ chainId: "0x1" }] });
+  }
+  wallet = { p, acc };
+  return acc;
+}
+const signTyped = (td) => wallet.p.request({ method: "eth_signTypedData_v4", params: [wallet.acc, JSON.stringify(td)] });
+
+function permitTypedData(pay, chainId) {
+  const a = pay.payload.permit2Authorization;
+  return {
+    domain: { name: "Permit2", chainId, verifyingContract: "0x000000000022D473030F116dDEE9F6B43aC78BA3" },
+    types: {
+      EIP712Domain: [{ name: "name", type: "string" }, { name: "chainId", type: "uint256" }, { name: "verifyingContract", type: "address" }],
+      PermitWitnessTransferFrom: [{ name: "permitted", type: "TokenPermissions" }, { name: "spender", type: "address" }, { name: "nonce", type: "uint256" }, { name: "deadline", type: "uint256" }, { name: "witness", type: "Witness" }],
+      TokenPermissions: [{ name: "token", type: "address" }, { name: "amount", type: "uint256" }],
+      Witness: [{ name: "to", type: "address" }, { name: "validAfter", type: "uint256" }],
+    },
+    primaryType: "PermitWitnessTransferFrom",
+    message: { permitted: { token: a.permitted.token, amount: a.permitted.amount }, spender: a.spender, nonce: a.nonce, deadline: a.deadline, witness: { to: a.witness.to, validAfter: a.witness.validAfter } },
+  };
+}
+function quoteTypedData(qa, paymentHash, chainId) {
+  return {
+    domain: { name: "IdentityMD Paid Action", version: "1", chainId },
+    types: {
+      EIP712Domain: [{ name: "name", type: "string" }, { name: "version", type: "string" }, { name: "chainId", type: "uint256" }],
+      QuoteApproval: [{ name: "resource", type: "string" }, { name: "requesterScopeHash", type: "bytes32" }, { name: "quoteId", type: "string" }, { name: "quoteHash", type: "bytes32" }, { name: "paymentHash", type: "bytes32" }, { name: "action", type: "string" }, { name: "asset", type: "address" }, { name: "amount", type: "uint256" }, { name: "payTo", type: "address" }, { name: "expiresAt", type: "uint256" }],
+    },
+    primaryType: "QuoteApproval",
+    message: { resource: qa.resource, requesterScopeHash: qa.requesterScopeHash, quoteId: qa.quoteId, quoteHash: qa.quoteHash, paymentHash, action: qa.action, asset: qa.asset, amount: qa.amount, payTo: qa.payTo, expiresAt: qa.expiresAt },
+  };
+}
+
+// ---------- screens ----------
+function replyBlock(q, code) {
+  const bot = /^[A-Za-z0-9_]{5,32}$/.test(q.reply || "") ? q.reply : "imddev_bot";
+  return `<div class="card"><div class="badge ok">signed</div>
+    <p>Send this code to @${esc(bot)}. It is not a secret: it only works for this order.</p>
+    <textarea id="code" readonly>${esc(code)}</textarea>
+    <a class="btn primary" id="send" href="https://t.me/${bot}?text=${encodeURIComponent(code)}">Send to @${esc(bot)}</a>
+    <button class="ghost" id="copy">Copy</button><div class="msg" id="cmsg"></div></div>`;
+}
+function wireCopy() {
+  const b = document.getElementById("copy"); if (!b) return;
+  b.onclick = async () => { const t = document.getElementById("code"); t.select();
+    try { await navigator.clipboard.writeText(t.value); } catch { document.execCommand("copy"); }
+    document.getElementById("cmsg").textContent = "Copied."; };
+}
+function countdown(expiresAt) {
+  const el = document.getElementById("left"); if (!el) return;
+  const tick = () => { const s = expiresAt - Math.floor(Date.now() / 1000);
+    el.textContent = s > 0 ? `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}` : "expired";
+    el.className = s > 60 ? "" : "badge bad"; if (s > 0) setTimeout(tick, 1000); };
+  tick();
+}
+
+function renderX402(q) {
+  checkX402(q);
+  const qa = q.qa, o = q.order || {};
+  $app.innerHTML = `<div class="card">
+      <span class="badge">${esc(qa.action)}</span><span class="badge">order ${esc(qa.quoteId.slice(0, 8))}</span>
+      <div class="big">${imd(qa.amount)}</div>
+      <div class="row"><span>Pays</span><span>${short(q.payer)}</span></div>
+      <div class="row"><span>To</span><span>IMD ${short(qa.payTo)}</span></div>
+      <div class="row"><span>Expires in</span><span id="left"></span></div>
+      ${o.preview ? `<div class="row"><span>Order</span><span>${esc(o.preview)}</span></div>` : ""}
+      <details><summary>Details</summary><pre>${esc(JSON.stringify({ qa, permit: q.payment.payload.permit2Authorization, input: o.input }, null, 1))}</pre></details>
+    </div>
+    <div class="card">
+      <div class="step" id="s1">1 · Connect ${short(q.payer)}</div>
+      <div class="step" id="s2">2 · Sign the payment (Permit2)</div>
+      <div class="step" id="s3">3 · Approve it for this order</div>
+      <button class="primary" id="go">Connect wallet</button>
+      <div class="msg" id="msg"></div>
+    </div><div id="out"></div>`;
+  countdown(Number(qa.expiresAt) - 20);
+  const go = document.getElementById("go"), msg = document.getElementById("msg");
+  const done = (id) => document.getElementById(id).classList.add("done");
+  let stage = 0, sig1 = null;
+  go.onclick = async () => {
+    msg.className = "msg"; msg.textContent = ""; go.disabled = true;
+    try {
+      if (Number(qa.expiresAt) - Math.floor(Date.now() / 1000) < 25) throw new Error("This quote has expired. Ask the bot for a fresh link.");
+      if (stage === 0) { await connect(q.payer); done("s1"); stage = 1; go.textContent = "Sign 1 of 2"; }
+      else if (stage === 1) { sig1 = normSig(await signTyped(permitTypedData(q.payment, q.chainId))); done("s2"); stage = 2; go.textContent = "Sign 2 of 2"; }
+      else if (stage === 2) {
+        const pay = JSON.parse(JSON.stringify(q.payment)); pay.payload.signature = sig1;
+        const paymentHash = await sha256hex(canon(pay));
+        const sig2 = normSig(await signTyped(quoteTypedData(qa, paymentHash, q.chainId)));
+        done("s3"); stage = 3; go.style.display = "none";
+        const code = `mcb1:${qa.quoteId.slice(0, 8)}:${bytesToB64u(new Uint8Array([...hexToBytes(sig1), ...hexToBytes(sig2)]))}`;
+        document.getElementById("out").innerHTML = replyBlock(q, code); wireCopy();
+      }
+    } catch (e) { msg.className = "msg bad"; msg.textContent = (e && (e.message || e.reason)) || String(e); }
+    go.disabled = false;
+  };
+}
+
+function renderTx(q) {
+  if (q.chainId !== C.chainId) throw new Error("Refused: not Ethereum mainnet.");
+  const txs = q.txs.map((t) => ({ ...t, d: decodeTx(t) }));
+  const total = txs.reduce((s, t) => s + t.d.amount, 0n);
+  $app.innerHTML = `<div class="card">
+      <span class="badge">${txs.length} transaction${txs.length > 1 ? "s" : ""}</span><span class="badge">gas in ETH</span>
+      <div class="big">${imd(total)}</div>
+      <div class="row"><span>From</span><span>${short(q.payer)}</span></div>
+      ${txs.map((t, i) => `<div class="tx"><div class="step" id="t${i}">${i + 1} · ${t.label ? esc(String(t.label).slice(0, 24)) + " · " : ""}${esc(t.d.title)}</div><div class="sub">${esc(t.d.sub)}</div></div>`).join("")}
+      <details><summary>Details</summary><pre>${esc(JSON.stringify(q.txs.map((t) => ({ to: t.to, data: t.data.slice(0, 74) + "…" })), null, 1))}</pre></details>
+    </div>
+    <div class="card"><button class="primary" id="go">Connect wallet</button><div class="msg" id="msg"></div></div><div id="out"></div>`;
+  const go = document.getElementById("go"), msg = document.getElementById("msg");
+  const hashes = []; let i = -1;
+  go.onclick = async () => {
+    msg.className = "msg"; msg.textContent = ""; go.disabled = true;
+    try {
+      if (i === -1) { await connect(q.payer); i = 0; }
+      else {
+        const t = txs[i];
+        const h = await wallet.p.request({ method: "eth_sendTransaction", params: [{ from: wallet.acc, to: t.to, data: t.data, value: "0x0" }] });
+        hashes.push(h); document.getElementById("t" + i).classList.add("done"); i++;
+        msg.className = "msg ok"; msg.textContent = `Sent ${short(h)}. Wait for it to confirm in the wallet, then go on.`;
+      }
+      if (i >= txs.length) { go.style.display = "none"; document.getElementById("out").innerHTML = replyBlock(q, `mcb1:tx:${hashes.join(",")}`); wireCopy(); }
+      else go.textContent = `Send ${i + 1} of ${txs.length}: ${txs[i].d.title}`;
+    } catch (e) { msg.className = "msg bad"; msg.textContent = (e && (e.message || e.reason)) || String(e); }
+    go.disabled = false;
+  };
+}
+
+// a new link in the same tab differs only after "#": start over with it
+window.addEventListener("hashchange", () => location.reload());
+(async () => {
+  try {
+    const q = await readRequest();
+    if (q.v !== 1) throw new Error("Unknown link version.");
+    if (q.kind === "x402") renderX402(q); else if (q.kind === "tx") renderTx(q); else throw new Error("Unknown link kind.");
+  } catch (e) { $app.innerHTML = `<div class="card"><div class="badge bad">stopped</div><div class="msg bad">${esc(e.message || e)}</div></div>`; }
+})();
+</script>
+</body>
+</html>
